@@ -21,7 +21,10 @@
  * reach the title after that, which shows them through the Vulkan driver
  * while no swapchain presents (a DirectShow movie drawn with GDI).
  * Sound goes out like frames: Wine's audio driver (wine/wineps5) hands its
- * mix to the title's one audio port, one grain at a time. */
+ * mix to the title's one audio port, one grain at a time. Sound comes in
+ * the other way: the driver asks the title's capture source (the user's
+ * DualSense microphone) for one grain at a time, and the source says with
+ * each grain whether the system keeps the microphone muted. */
 
 /* BGRA, top-down; stride in bytes. Returns the sink's result. */
 typedef int (*PwWinePresentSink)(void *context,const void *bgra,uint32_t width,uint32_t height,
@@ -44,6 +47,30 @@ enum { PW_WINE_AUDIO_RATE=48000,PW_WINE_AUDIO_GRAIN=256 };
  * console's output clocks the caller. Returns the sink's result. */
 typedef int (*PwWineAudioSink)(void *context,const int16_t *frames);
 
+/* The microphone: grains of PW_WINE_CAPTURE_GRAIN 16-bit mono frames, at
+ * the rate the source opened with. */
+enum { PW_WINE_CAPTURE_GRAIN=256 };
+/* The microphone's state, as the title's source last saw it. */
+enum {
+    PW_WINE_MIC_UNKNOWN=0,      /* not opened yet, or the console did not say */
+    PW_WINE_MIC_LIVE=1,
+    PW_WINE_MIC_MUTED=2,        /* the system silences it (the DualSense's mute button) */
+    PW_WINE_MIC_NO_DEVICE=3,    /* no microphone (the controller is gone) */
+};
+typedef struct PwWineCaptureSource {
+    /* Opens the microphone the first time; 0 and its rate in frames per
+     * second, later calls 0 and the same rate. Else the title's refusal,
+     * and it may be asked again. */
+    int (*open)(void *context,uint32_t *rate);
+    /* Blocks until one grain is captured: 0, the grain (zeros while the
+     * microphone is muted) and PW_WINE_MIC_* in *state; else the source's
+     * result. */
+    int (*input)(void *context,int16_t *frames,uint32_t *state);
+    /* Optional: PW_WINE_MIC_* now, without capturing; NULL if none. Called
+     * beside input on another thread. */
+    uint32_t (*state)(void *context);
+} PwWineCaptureSource;
+
 /* Hands the video output over to a Vulkan display-plane surface; 0 once
  * the title no longer uses it. */
 typedef int (*PwWineDisplayRelease)(void *context);
@@ -53,6 +80,9 @@ typedef struct PwWineSinkStats {
     uint64_t inputs_posted,inputs_dropped,inputs_delivered;
     uint64_t grains,grains_dropped;       /* audio; dropped as for frames */
     uint32_t display_released;            /* 1 once Vulkan took the video output */
+    uint64_t capture_grains,capture_silent,capture_dropped; /* microphone: delivered, muted
+                                                             * or without a device, failed */
+    uint32_t mic_state;                   /* PW_WINE_MIC_*, the newest */
 } PwWineSinkStats;
 
 /* XInput's controllers (XUSER_MAX_COUNT): 0 is the title's own user's
@@ -72,6 +102,8 @@ typedef struct PwWinePad {
 /* Title side. */
 void pw_wine_set_present_sink(PwWinePresentSink sink,void *context);
 void pw_wine_set_audio_sink(PwWineAudioSink sink,void *context);
+/* The microphone, copied; NULL removes it. */
+void pw_wine_set_capture_source(const PwWineCaptureSource *source,void *context);
 void pw_wine_set_display_release(PwWineDisplayRelease release,void *context);
 /* 0, or -1 when the queue is full or the event is invalid. */
 int pw_wine_post_input(const PwWineInput *event);
@@ -125,5 +157,18 @@ int pw_wine_audio_available(void);
 /* Blocks while the sink plays one grain. -1 when no sink is set or frames
  * is NULL. */
 int pw_wine_audio_output(const int16_t *frames);
+/* 1 when the title set a capture source: the audio driver offers its
+ * microphone only then. */
+int pw_wine_capture_available(void);
+/* Opens the microphone (the source's open): 0 and its rate, -1 without a
+ * source or rate, else the source's refusal. */
+int pw_wine_capture_open(uint32_t *rate);
+/* Blocks while the source captures one grain of PW_WINE_CAPTURE_GRAIN
+ * frames: 0, the grain and PW_WINE_MIC_* in *state (state may be NULL).
+ * -1 when no source is set or frames is NULL; zeros on any failure. */
+int pw_wine_capture_input(int16_t *frames,uint32_t *state);
+/* PW_WINE_MIC_*: the source's state now when it can tell without
+ * capturing, else the newest grain's. Never blocks on a capture. */
+uint32_t pw_wine_mic_state(void);
 
 #endif

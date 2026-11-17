@@ -37,7 +37,8 @@
 #include "../src/pw_wine_launch.h"
 #include "../src/pw_game_menu.h"
 #include "pw_data_mount.h"
-#include "pw_audio_ps5.h"
+#include "pw_audio_out_ps5.h"
+#include "pw_audio_in_ps5.h"
 #include "pw_pad_ps5.h"
 #include "pw_hid_ps5.h"
 #include "pw_osk_ps5.h"
@@ -432,9 +433,9 @@ static int wine_release_display(void *context)
  * one grain at a time and hands it to this sink, which plays it on the
  * console's main port. sceAudioOutOutput returns once the port has taken
  * the grain, so the port clocks the driver. */
-_Static_assert(PW_WINE_AUDIO_GRAIN == PW_AUDIO_PS5_GRAIN && PW_WINE_AUDIO_RATE == PW_AUDIO_PS5_RATE,
+_Static_assert(PW_WINE_AUDIO_GRAIN == PW_AUDIO_OUT_PS5_GRAIN && PW_WINE_AUDIO_RATE == PW_AUDIO_OUT_PS5_RATE,
                "Wine's audio grain is the port's");
-static PwAudioPs5Ops audio_ops;
+static PwAudioOutPs5Ops audio_ops;
 static int audio_port = -1;
 /* Grains played, and those with any sound in them. */
 static volatile unsigned long audio_grains, audio_audible;
@@ -446,6 +447,67 @@ static int wine_audio(void *context, const int16_t *frames)
     for (size_t i = 0; i < 2u * PW_WINE_AUDIO_GRAIN; i++)
         if (frames[i]) { audio_audible++; break; }
     return audio_ops.output(audio_port, frames) < 0 ? -1 : 0;
+}
+
+/* ---- microphone --------------------------------------------------------- */
+
+/* The user's DualSense microphone is the game's capture endpoint: Wine's
+ * audio driver asks this source for one grain at a time on its capture
+ * thread, and sceAudioInInput returns once the port has captured it. The
+ * port opens the first time Wine asks (a game opening a capture stream, or
+ * asking whether the microphone is muted) and stays open for the game. The
+ * mute button is the system's; each grain's silent state says whether it
+ * is lit, and a muted grain reaches the game as zeros. */
+_Static_assert(PW_WINE_CAPTURE_GRAIN == PW_AUDIO_IN_PS5_GRAIN, "Wine's capture grain is the port's");
+_Static_assert(PW_WINE_MIC_UNKNOWN == PW_AUDIO_IN_PS5_UNKNOWN && PW_WINE_MIC_LIVE == PW_AUDIO_IN_PS5_LIVE &&
+               PW_WINE_MIC_MUTED == PW_AUDIO_IN_PS5_MUTED && PW_WINE_MIC_NO_DEVICE == PW_AUDIO_IN_PS5_NO_DEVICE,
+               "the microphone's states are the sink's");
+static PwAudioInPs5Ops mic_ops;
+static PwAudioInPs5 mic = { .handle = -1 };
+static int32_t mic_user = -1;
+/* Opening is serialised: the capture thread and a game thread asking for
+ * the mute can both be first. Reads need no lock: the port, once open,
+ * stays as it is. */
+static pthread_mutex_t mic_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile int mic_open_status = PW_ERR_NOT_FOUND, mic_open_tried;
+
+static int mic_ensure_open(void)
+{
+    pthread_mutex_lock(&mic_lock);
+    if (mic.handle < 0 && !mic_open_tried) {
+        mic_open_status = pw_audio_in_ps5_open(&mic, &mic_ops, mic_user);
+        /* one try per game: a refused port would refuse every grain */
+        mic_open_tried = 1;
+    }
+    int open = mic.handle >= 0;
+    pthread_mutex_unlock(&mic_lock);
+    return open;
+}
+static int wine_mic_open(void *context, uint32_t *rate)
+{
+    (void)context;
+    if (!mic_ensure_open()) return -1;
+    *rate = mic.rate;
+    return 0;
+}
+static int wine_mic_input(void *context, int16_t *frames, uint32_t *state)
+{
+    (void)context;
+    return pw_audio_in_ps5_read(&mic, frames, state) == PW_OK ? 0 : -1;
+}
+static uint32_t wine_mic_state(void *context)
+{
+    (void)context;
+    return mic_ensure_open() ? pw_audio_in_ps5_poll(&mic) : PW_WINE_MIC_UNKNOWN;
+}
+static const char *mic_state_name(uint32_t state)
+{
+    switch (state) {
+    case PW_WINE_MIC_LIVE: return "live";
+    case PW_WINE_MIC_MUTED: return "muted";
+    case PW_WINE_MIC_NO_DEVICE: return "no-device";
+    default: return "unknown";
+    }
 }
 
 /* Scale a frame onto the whole screen as the profile asks (fit keeps the
@@ -1368,11 +1430,28 @@ int main(int argc, char **argv)
         {
             void (*set_audio)(PwWineAudioSink, void *) = (void (*)(PwWineAudioSink, void *))
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_audio_sink");
-            int audio_status = set_audio ? pw_audio_ps5_platform_ops(&audio_ops) : PW_ERR_NOT_FOUND;
-            if (audio_status == PW_OK) audio_status = pw_audio_ps5_open_port(&audio_ops, &audio_port);
+            int audio_status = set_audio ? pw_audio_out_ps5_platform_ops(&audio_ops) : PW_ERR_NOT_FOUND;
+            if (audio_status == PW_OK) audio_status = pw_audio_out_ps5_open_port(&audio_ops, &audio_port);
             if (audio_status == PW_OK) set_audio(wine_audio, NULL);
             PS5LOG_LOG("PW_WINE64 audio sink=%d port=%d status=%s", set_audio != NULL, audio_port,
                        pw_result_name(audio_status));
+        }
+        {
+            /* The pad's user's microphone, else the foreground user's. */
+            void (*set_capture)(const PwWineCaptureSource *, void *) =
+                (void (*)(const PwWineCaptureSource *, void *))
+                (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_capture_source");
+            static const PwWineCaptureSource mic_source = { wine_mic_open, wine_mic_input, wine_mic_state };
+            int mic_status = set_capture ? pw_audio_in_ps5_platform_ops(&mic_ops) : PW_ERR_NOT_FOUND;
+            mic_user = pad_status == PW_OK ? pad.user_id : -1;
+            if (mic_status == PW_OK && mic_user < 0 && pw_pad_ps5_platform_ops(&pad_ops) == PW_OK) {
+                (void)pad_ops.user_initialize(NULL);
+                (void)pad_ops.foreground_user(&mic_user);
+            }
+            if (mic_status == PW_OK && mic_user < 0) mic_status = PW_ERR_STATE;
+            if (mic_status == PW_OK) set_capture(&mic_source, NULL);
+            PS5LOG_LOG("PW_WINE64 mic source=%d user=%d status=%s", set_capture != NULL, (int)mic_user,
+                       pw_result_name(mic_status));
         }
         /* The game starts in its profile's working directory. A title
          * cannot chdir, so ntdll keeps a logical one (wine/ps5/pw_wine_cwd.h),
@@ -1764,6 +1843,28 @@ int main(int argc, char **argv)
             pw_pad_players_close(&players);
             restart_title(NULL, launch.cycle + 1u, "close-timeout");
             break;
+        }
+        /* The microphone: once its port opened, and whenever its state
+         * changes (the mute button), and with the alive line. */
+        if (mic_open_tried) {
+            static int mic_open_logged;
+            static uint32_t mic_logged = 0xffffffffu;
+            uint32_t mic_now = __atomic_load_n(&mic.state, __ATOMIC_RELAXED);
+
+            if (!mic_open_logged) {
+                mic_open_logged = 1;
+                PS5LOG_LOG("PW_WINE64 mic open user=%d status=%s type=%u rate=%u rc=%#x state=%s",
+                           (int)mic_user, pw_result_name(mic_open_status), mic.type, mic.rate,
+                           (unsigned)mic.open_rc, mic_state_name(mic_now));
+            }
+            if (mic.handle >= 0 && (mic_now != mic_logged || tick % 60 == 0)) {
+                mic_logged = mic_now;
+                PS5LOG_LOG("PW_WINE64 mic state=%s silent=%#x grains=%llu silent_grains=%llu failed=%llu "
+                           "input_rc=%d", mic_state_name(mic_now),
+                           (unsigned)__atomic_load_n(&mic.last_silent, __ATOMIC_RELAXED),
+                           (unsigned long long)mic.grains, (unsigned long long)mic.silent_grains,
+                           (unsigned long long)mic.failed_grains, mic.last_input_rc);
+            }
         }
         if (tick % 60 == 0) {
             uint64_t v[16] = { 0 };
