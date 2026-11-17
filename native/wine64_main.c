@@ -37,7 +37,7 @@
 #include "../src/pw_wine_launch.h"
 #include "../src/pw_game_menu.h"
 #include "pw_data_mount.h"
-#include "pw_audio_ps5.h"
+#include "pw_audio_out_ps5.h"
 #include "pw_audio_in_ps5.h"
 #include "pw_pad_ps5.h"
 #include "pw_hid_ps5.h"
@@ -433,9 +433,9 @@ static int wine_release_display(void *context)
  * one grain at a time and hands it to this sink, which plays it on the
  * console's main port. sceAudioOutOutput returns once the port has taken
  * the grain, so the port clocks the driver. */
-_Static_assert(PW_WINE_AUDIO_GRAIN == PW_AUDIO_PS5_GRAIN && PW_WINE_AUDIO_RATE == PW_AUDIO_PS5_RATE,
+_Static_assert(PW_WINE_AUDIO_GRAIN == PW_AUDIO_OUT_PS5_GRAIN && PW_WINE_AUDIO_RATE == PW_AUDIO_OUT_PS5_RATE,
                "Wine's audio grain is the port's");
-static PwAudioPs5Ops audio_ops;
+static PwAudioOutPs5Ops audio_ops;
 static int audio_port = -1;
 /* Grains played, and those with any sound in them. */
 static volatile unsigned long audio_grains, audio_audible;
@@ -1430,8 +1430,8 @@ int main(int argc, char **argv)
         {
             void (*set_audio)(PwWineAudioSink, void *) = (void (*)(PwWineAudioSink, void *))
                 (uintptr_t)pw_prx_lookup(start.descriptor, "pw_wine_set_audio_sink");
-            int audio_status = set_audio ? pw_audio_ps5_platform_ops(&audio_ops) : PW_ERR_NOT_FOUND;
-            if (audio_status == PW_OK) audio_status = pw_audio_ps5_open_port(&audio_ops, &audio_port);
+            int audio_status = set_audio ? pw_audio_out_ps5_platform_ops(&audio_ops) : PW_ERR_NOT_FOUND;
+            if (audio_status == PW_OK) audio_status = pw_audio_out_ps5_open_port(&audio_ops, &audio_port);
             if (audio_status == PW_OK) set_audio(wine_audio, NULL);
             PS5LOG_LOG("PW_WINE64 audio sink=%d port=%d status=%s", set_audio != NULL, audio_port,
                        pw_result_name(audio_status));

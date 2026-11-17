@@ -104,7 +104,7 @@ def test_builder_builds_the_wine64_title() -> None:
     assert listed[0] == "native/wine64_main.c"
     for name in listed:
         assert (ROOT / name).is_file(), f"tools/build_native.sh compiles missing {name}"
-    for name in ("native/pw_audio_ps5.c", "native/pw_agc_submit_lifecycle.c",
+    for name in ("native/pw_audio_out_ps5.c", "native/pw_agc_submit_lifecycle.c",
                  "native/pw_data_mount.c", "native/pw_wine_library.c"):
         assert name in sources, name
     # The banned import is rejected by the build, not merely documented.
