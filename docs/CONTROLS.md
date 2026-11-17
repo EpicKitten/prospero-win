@@ -168,6 +168,29 @@ or loses it, makes way for the next user. Its buttons send keys through
 mouse buttons and `mouse` stick are ignored, and closing the game with
 Options + Create stays the first player's.
 
+### The microphone
+
+The DualSense's microphone (or a headset plugged into it) is the game's
+microphone: Windows games find a recording device named **Microphone
+(DualSense Wireless Controller)** for voice chat or anything else that
+records. It belongs to the first player, the user whose controller drives
+the game. The PS5 opens it the first time a game records or asks whether
+it is muted, and keeps it open until the game closes.
+
+The **mute button** works as on the console: while its light is on, the
+game records silence. The game is also told the microphone is muted, the
+way a PC tells it about a headset's mute switch, so a game that shows a
+muted-microphone icon shows it. Press the button again and the sound comes
+back. A game can't unmute the microphone itself.
+
+When party chat or another app has the microphone, the game records
+silence, as it does while the microphone is muted.
+
+This is new and hasn't been tested on a console yet. If a game hears
+nothing, or the mute button doesn't do what's described here, please open
+an issue with the game's log: the `PW_WINE64 mic` lines say what the
+console reported.
+
 ## Closing a game
 
 Hold **Options + Create** for three seconds on the DualSense (games use

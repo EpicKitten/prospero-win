@@ -26,6 +26,7 @@ native/            the title
   pw_videoout_ps5     scanout, tiling and scaling into VideoOut (AGC copy and flip)
   pw_pad_ps5          DualSense ownership, edges, sticks, triggers, rumble
   pw_audio_ps5        the main AudioOut port Wine's driver plays on
+  pw_audio_in_ps5     the first player's microphone (AudioIn) Wine's driver records from, and its mute
   pw_data_mount       requests /data through a one-shot ELF helper sent to elfldr
   ps5log/             vendored `ps5log/1` client, pinned by digest
 
@@ -36,6 +37,7 @@ src/               portable code, host-tested
   pw_wine_launch, pw_wine_start            launch arguments, starting ntdll.prx
   pw_launcher_render, pw_present           the launcher picture, frame placement and scaling
   pw_pad, pw_audio_mix                     pad edge tracking, the Wine audio mixer
+  pw_audio_capture                         the microphone into each Wine recording stream's format
 
 wine/
   patches/            the PS5 patch series (docs/WINE_PS5_BUILD.md)

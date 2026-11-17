@@ -586,7 +586,10 @@ means no audio.
 `wine/wineps5/unix.c` is the driver's Unix side, built and linked by the PRX
 stage like `wowprospero.prx`. Its stream, buffer and WoW64 code follows
 Wine's OSS driver.
-- It offers one render endpoint, `PS5`, and no capture.
+- It offers one render endpoint, `PS5`. While the title offers a
+  microphone it also offers a capture endpoint, `DualSense Wireless
+  Controller` (device `ps5mic`), which mmdevapi lists as
+  `Microphone (DualSense Wireless Controller)`.
 - Its mix format is 48 kHz float stereo. A stream may use any PCM or float
   format `src/pw_audio_mix.h` decodes: winmm and dsound open theirs with
   `AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`.
@@ -599,6 +602,36 @@ Wine's OSS driver.
   therefore the clock, and each stream's event is set once per period.
 - It reports itself unavailable when the title set no sink, so mmdevapi
   offers no device.
+
+Capture runs the other way through the same sink. The title sets a capture
+source (`pw_wine_set_capture_source`): the first player's microphone, read
+with `sceAudioInInput` (`native/pw_audio_in_ps5.c`).
+- The first capture stream opens the microphone (`pw_wine_capture_open`):
+  a voice-chat port at 16 kHz, or else a general one at 48 kHz, 256-sample
+  grains of 16-bit mono. A microphone that does not open is an invalid
+  device (`AUDCLNT_E_DEVICE_INVALIDATED`).
+- Its mix format is 48 kHz float mono. A stream may use any format the
+  render side accepts; `src/pw_audio_capture.h` resamples the microphone to
+  the stream's rate and writes the sample into every channel.
+- A second Unix thread asks the source for one grain at a time
+  (`pw_wine_capture_input`), which returns once the port has captured it,
+  and appends it to every started capture stream's ring. The port is the
+  clock. A ring that fills drops its oldest frames, and the next packet
+  carries `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY`.
+- The DualSense's mute button belongs to the system. Every grain comes with
+  the port's silent state (`sceAudioInGetSilentState`). While any bit other
+  than "no device" is set, the microphone is muted: its grains reach the
+  game as zeros, whatever the port returned, and packets made only of them
+  carry `AUDCLNT_BUFFERFLAGS_SILENT`.
+- The endpoint answers the device-mute property of patch 0987 with the
+  same state. mmdevapi's `IAudioEndpointVolume::GetMute` reports it beside
+  the mute a program set. Wine's endpoint volume sends no change
+  notifications, so a game that only waits for one is not told.
+
+The game log shows `PW_WINE64 mic source=1 user=<id> status=ok` at start,
+`PW_WINE64 mic open ...` once the microphone opens, and a
+`PW_WINE64 mic state=...` line whenever its state changes
+([telemetry](TELEMETRY.md)).
 
 To use it on the console, stage `wineps5.prx` beside `ntdll.prx`. The game
 log then shows `PW_WINE64 audio sink=1 port=<handle> status=ok`.

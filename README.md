@@ -38,6 +38,9 @@ Built to bridge generations of Windows gaming—from 2000s classics to newer
 - **The console's on-screen keyboard** in a game, opened with a two-finger
   touchpad click, typed into the game as keys.
 - **Game audio** through the PS5's audio output.
+- **The DualSense's microphone** as the game's microphone, for voice chat
+  and recording, with the controller's mute button respected (new, not yet
+  tested on a console).
 - **A game launcher** with individual profiles, graphics settings and
   control presets.
 - **Separate game installations**, with tools to transfer games and
