@@ -100,8 +100,9 @@ TARGETS="dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver dlls/winevu
 # wrote past its buffer (patch 0972).
 # kernelbase: no debugger start in a title (patch 0971), and the computer
 # name without wineboot's volatile key (patch 0957). gdi32: a window keeps
-# its pixel format with a native opengl32 (patch 0956).
-PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan kernelbase gdi32"
+# its pixel format with a native opengl32 (patch 0956). mmdevapi: a
+# microphone's endpoint volume reports the DualSense's mute (patch 0987).
+PE_MODULES="ntdll win32u xinput1_1 xinput1_2 xinput1_3 xinput1_4 xinputuap quartz winevulkan kernelbase gdi32 mmdevapi"
 PE_MODULES="$PE_MODULES xaudio2_0 xaudio2_1 xaudio2_2 xaudio2_3 xaudio2_4 xaudio2_5 xaudio2_6 xaudio2_7 xaudio2_8 xaudio2_9 xactengine2_0 xactengine2_4 xactengine2_7 xactengine2_9 xactengine3_0 xactengine3_1 xactengine3_2 xactengine3_3 xactengine3_4 xactengine3_5 xactengine3_6 xactengine3_7"
 # Everything optional but FreeType (built below) is off: the console has none
 # of these libraries, and a configure-time probe against the payload SDK must
@@ -424,6 +425,8 @@ if [ "$prx_status" = 0 ]; then
         pw_wine_set_pad pw_wine_rumble pw_wine_pad pw_wine_set_rumble pw_wine_set_menu pw_wine_menu \
         pw_wine_set_pad_at pw_wine_rumble_at pw_wine_pad_at pw_wine_set_rumble_at pw_wine_pads_wanted pw_wine_pad_changes \
         pw_wine_set_audio_sink pw_wine_audio_available pw_wine_audio_output \
+        pw_wine_set_capture_source pw_wine_capture_available pw_wine_capture_open pw_wine_capture_input \
+        pw_wine_mic_state \
         __wine_virtual_stats __wine_virtual_fault_top __wine_ps5_set_output_sink __wine_ps5_memory_stats pw_cwd_set \
         __wine_ps5_set_segv_hook __wine_ps5_set_segv_unresolved_hook pw_wine_set_display_release pw_wine_release_display \
         --optional-from "$build/dlls/ntdll/ntdll.so" --nm "$sdk/bin/prospero-nm" \
@@ -495,7 +498,8 @@ if [ "$prx_status" = 0 ]; then
     link_prx wowprospero - "$wow $prx/obj/emutls.o $prx/obj/wowprospero_desc.o" "$prx/ntdll.shared.elf"
     link_prx libfreetype - "$ft/obj/*.o $prx/obj/libfreetype_desc.o"
     # The audio driver (wine/wineps5): mmdevapi loads it by name, and it
-    # mixes into the title's audio sink, which ntdll exports.
+    # mixes into the title's audio sink and records from its microphone,
+    # both of which ntdll exports.
     # mmdevapi's interfaces are IDL; the ELF link built only what ntdll,
     # win32u and the server include.
     make -C "$build" include/audioclient.h include/mmdeviceapi.h include/devicetopology.h \
@@ -503,7 +507,7 @@ if [ "$prx_status" = 0 ]; then
         include/unknwn.h include/wtypes.h include/oaidl.h >> "$work/make.log" 2>&1 ||
         fail "cannot generate mmdevapi's headers; see $work/make.log"
     audio=""
-    for unit in wine/wineps5/unix.c src/pw_audio_mix.c; do
+    for unit in wine/wineps5/unix.c src/pw_audio_mix.c src/pw_audio_capture.c; do
         object=$prx/obj/wineps5_$(basename "$unit" .c).o
         "$sdk/bin/prospero-clang" -std=gnu11 -O2 -fPIC -D__WINESRC__ -DWINE_UNIX_LIB -D_REENTRANT \
             -I"$build/include" -I"$tree/include" -I"$tree/dlls/mmdevapi" -I"$root/wine/ps5" \

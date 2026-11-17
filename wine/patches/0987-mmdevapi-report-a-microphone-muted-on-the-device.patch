@@ -1,0 +1,103 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: prospero-win <prospero-win@invalid>
+Date: Tue, 17 Nov 2026 12:00:00 +0100
+Subject: [PATCH] mmdevapi: Report a microphone muted on the device itself.
+
+A DualSense has a mute button, and on the PS5 the system keeps the
+microphone muted while it is lit: no volume a program sets can unmute it.
+On Windows such a switch shows in the capture endpoint's
+IAudioEndpointVolume::GetMute. Wine's endpoint volume keeps only the mute a
+program set. Ask the driver for the device's own mute through
+get_prop_value, under a key drivers without a switch do not know (they
+fail the query, and GetMute is unchanged), and report either mute.
+---
+ dlls/mmdevapi/audiovolume.c | 36 +++++++++++++++++++++++++++++++++++-
+ dlls/mmdevapi/unixlib.h     |  7 +++++++
+ 2 files changed, 42 insertions(+), 1 deletion(-)
+
+diff --git a/dlls/mmdevapi/audiovolume.c b/dlls/mmdevapi/audiovolume.c
+--- a/dlls/mmdevapi/audiovolume.c
++++ b/dlls/mmdevapi/audiovolume.c
+@@ -44,6 +44,8 @@ typedef struct AEVImpl {
+     LONG ref;
+     float master_vol;
+     BOOL mute;
++    EDataFlow flow;
++    GUID devguid;
+ } AEVImpl;
+ 
+ static inline AEVImpl *impl_from_IAudioEndpointVolumeEx(IAudioEndpointVolumeEx *iface)
+@@ -210,6 +212,36 @@ static HRESULT WINAPI AEV_SetMute(IAudioEndpointVolumeEx *iface, BOOL mute, cons
+     return ret;
+ }
+ 
++/* A microphone muted on the device itself (a controller's mute button),
++ * as its driver reports it; FALSE when the driver keeps no such switch. */
++static BOOL device_muted(AEVImpl *This)
++{
++    static const PROPERTYKEY device_mute = WINE_PKEY_AUDIOENDPOINT_DEVICE_MUTE;
++    struct get_prop_value_params params;
++    unsigned int size = 0;
++    PROPVARIANT pv;
++    char *name;
++    BOOL muted;
++
++    if (This->flow != eCapture || !get_device_name_from_guid(&This->devguid, &name, &params.flow))
++        return FALSE;
++
++    PropVariantInit(&pv);
++    params.device = name;
++    params.guid = &This->devguid;
++    params.prop = &device_mute;
++    params.value = &pv;
++    params.buffer = NULL;
++    params.buffer_size = &size;
++    __wine_unix_call(drvs.module_unixlib, get_prop_value, &params);
++    free(name);
++
++    muted = SUCCEEDED(params.result) && pv.vt == VT_BOOL && pv.boolVal != VARIANT_FALSE;
++    if (SUCCEEDED(params.result))
++        PropVariantClear(&pv);
++    return muted;
++}
++
+ static HRESULT WINAPI AEV_GetMute(IAudioEndpointVolumeEx *iface, BOOL *mute)
+ {
+     AEVImpl *This = impl_from_IAudioEndpointVolumeEx(iface);
+@@ -219,7 +251,7 @@ static HRESULT WINAPI AEV_GetMute(IAudioEndpointVolumeEx *iface, BOOL *mute)
+     if (!mute)
+         return E_POINTER;
+ 
+-    *mute = This->mute;
++    *mute = This->mute || device_muted(This);
+ 
+     return S_OK;
+ }
+@@ -314,6 +346,8 @@ HRESULT AudioEndpointVolume_Create(MMDevice *parent, IAudioEndpointVolumeEx **pp
+         return E_OUTOFMEMORY;
+     This->IAudioEndpointVolumeEx_iface.lpVtbl = &AEVImpl_Vtbl;
+     This->ref = 1;
++    This->flow = parent->flow;
++    This->devguid = parent->devguid;
+ 
+     *ppv = &This->IAudioEndpointVolumeEx_iface;
+     return S_OK;
+diff --git a/dlls/mmdevapi/unixlib.h b/dlls/mmdevapi/unixlib.h
+--- a/dlls/mmdevapi/unixlib.h
++++ b/dlls/mmdevapi/unixlib.h
+@@ -251,6 +251,13 @@ struct is_started_params
+     HRESULT result;
+ };
+ 
++/* A capture endpoint's mute as the device itself keeps it (VT_BOOL), for a
++ * microphone muted by a switch on the hardware, which the endpoint's own
++ * volume cannot unmute: IAudioEndpointVolume reports it beside its own
++ * mute. A driver without such a switch fails the query. */
++#define WINE_PKEY_AUDIOENDPOINT_DEVICE_MUTE \
++    {{0x5c3e7a4d, 0x1f2b, 0x4e8a, {0x9d, 0x61, 0x2a, 0x7c, 0x83, 0x0e, 0x54, 0xb9}}, 2}
++
+ struct get_prop_value_params
+ {
+     const char *device;
+-- 
+2.43.0

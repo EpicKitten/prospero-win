@@ -28,6 +28,15 @@ static pthread_mutex_t audio_lock=PTHREAD_MUTEX_INITIALIZER;
 static PwWineAudioSink audio_sink;
 static void *audio_context;
 static uint64_t grains,grains_dropped;
+/* The microphone: capture_lock serialises the source's open and input,
+ * which block; source_lock guards the source and the counts, so the state
+ * can be asked for while a grain is being captured. */
+static pthread_mutex_t capture_lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t source_lock=PTHREAD_MUTEX_INITIALIZER;
+static PwWineCaptureSource capture_source;
+static void *capture_context;
+static uint64_t capture_grains,capture_silent,capture_dropped;
+static uint32_t mic_state;      /* PW_WINE_MIC_*; atomic */
 
 static void create_wake_pipe(void)
 {
@@ -161,6 +170,94 @@ int pw_wine_audio_output(const int16_t *frames)
     return status;
 }
 
+void pw_wine_set_capture_source(const PwWineCaptureSource *source,void *context)
+{
+    /* a grain being captured finishes with the source it began with */
+    pthread_mutex_lock(&capture_lock);
+    pthread_mutex_lock(&source_lock);
+    if(source && source->open && source->input) {
+        capture_source=*source;capture_context=context;
+    } else {
+        memset(&capture_source,0,sizeof(capture_source));capture_context=NULL;
+    }
+    pthread_mutex_unlock(&source_lock);
+    pthread_mutex_unlock(&capture_lock);
+    __atomic_store_n(&mic_state,PW_WINE_MIC_UNKNOWN,__ATOMIC_RELAXED);
+}
+static int current_source(PwWineCaptureSource *source,void **context)
+{
+    pthread_mutex_lock(&source_lock);
+    *source=capture_source;*context=capture_context;
+    pthread_mutex_unlock(&source_lock);
+    return source->input!=NULL;
+}
+int pw_wine_capture_available(void)
+{
+    PwWineCaptureSource source;
+    void *context;
+    return current_source(&source,&context);
+}
+int pw_wine_capture_open(uint32_t *rate)
+{
+    PwWineCaptureSource source;
+    void *context;
+    uint32_t opened=0;
+    int status=-1;
+    if(!rate)return -1;
+    pthread_mutex_lock(&capture_lock);
+    if(current_source(&source,&context)) {
+        status=source.open(context,&opened);
+        if(!status && !opened)status=-1;
+    }
+    pthread_mutex_unlock(&capture_lock);
+    if(!status)*rate=opened;
+    return status;
+}
+static int valid_mic_state(uint32_t state)
+{
+    return state<=PW_WINE_MIC_NO_DEVICE;
+}
+int pw_wine_capture_input(int16_t *frames,uint32_t *state)
+{
+    PwWineCaptureSource source;
+    void *context;
+    uint32_t now=PW_WINE_MIC_UNKNOWN;
+    int status=-1;
+    if(state)*state=PW_WINE_MIC_UNKNOWN;
+    if(!frames)return -1;
+    pthread_mutex_lock(&capture_lock);
+    if(current_source(&source,&context))status=source.input(context,frames,&now);
+    pthread_mutex_unlock(&capture_lock);
+    if(!valid_mic_state(now))now=PW_WINE_MIC_UNKNOWN;
+    /* nothing the source failed to capture, and nothing a muted microphone
+     * picked up, reaches the game */
+    if(status || now==PW_WINE_MIC_MUTED || now==PW_WINE_MIC_NO_DEVICE)
+        memset(frames,0,PW_WINE_CAPTURE_GRAIN*sizeof(*frames));
+    pthread_mutex_lock(&source_lock);
+    if(status)capture_dropped++;
+    else {
+        capture_grains++;
+        if(now==PW_WINE_MIC_MUTED || now==PW_WINE_MIC_NO_DEVICE)capture_silent++;
+    }
+    pthread_mutex_unlock(&source_lock);
+    if(!status)__atomic_store_n(&mic_state,now,__ATOMIC_RELAXED);
+    if(state)*state=status?PW_WINE_MIC_UNKNOWN:now;
+    return status;
+}
+uint32_t pw_wine_mic_state(void)
+{
+    PwWineCaptureSource source;
+    void *context;
+    if(current_source(&source,&context) && source.state) {
+        uint32_t now=source.state(context);
+        if(valid_mic_state(now) && now!=PW_WINE_MIC_UNKNOWN) {
+            __atomic_store_n(&mic_state,now,__ATOMIC_RELAXED);
+            return now;
+        }
+    }
+    return __atomic_load_n(&mic_state,__ATOMIC_RELAXED);
+}
+
 void pw_wine_sink_stats(PwWineSinkStats *out)
 {
     if(!out)return;
@@ -170,6 +267,11 @@ void pw_wine_sink_stats(PwWineSinkStats *out)
     pthread_mutex_lock(&audio_lock);
     out->grains=grains;out->grains_dropped=grains_dropped;
     pthread_mutex_unlock(&audio_lock);
+    pthread_mutex_lock(&source_lock);
+    out->capture_grains=capture_grains;out->capture_silent=capture_silent;
+    out->capture_dropped=capture_dropped;
+    pthread_mutex_unlock(&source_lock);
+    out->mic_state=__atomic_load_n(&mic_state,__ATOMIC_RELAXED);
 }
 
 /* The pad has its own fields compared, not memcmp'd: padding stays out. */

@@ -165,6 +165,79 @@ static void test_audio(void)
     pw_wine_sink_stats(NULL);
 }
 
+static int mic_opens,mic_inputs,mic_open_fail,mic_input_fail;
+static uint32_t mic_rate=16000,mic_now=PW_WINE_MIC_LIVE,mic_polled=PW_WINE_MIC_UNKNOWN;
+static void *mic_seen;
+static int mic_open(void *context,uint32_t *rate)
+{
+    mic_seen=context;mic_opens++;
+    if(mic_open_fail)return -4;
+    *rate=mic_rate;return 0;
+}
+static int mic_input(void *context,int16_t *frames,uint32_t *state)
+{
+    mic_seen=context;mic_inputs++;
+    for(int i=0;i<PW_WINE_CAPTURE_GRAIN;i++)frames[i]=(int16_t)(i+7);
+    *state=mic_now;
+    return mic_input_fail?-6:0;
+}
+static uint32_t mic_poll(void *context){(void)context;return mic_polled;}
+
+/* The microphone: offered only with a source; muted grains and failed ones
+ * reach the driver as zeros, and the state follows the source. */
+static void test_capture(void)
+{
+    int16_t grain[PW_WINE_CAPTURE_GRAIN];
+    uint32_t rate=0,state=99;
+    PwWineSinkStats s;
+    int tag;
+    PwWineCaptureSource source={mic_open,mic_input,mic_poll};
+
+    assert(!pw_wine_capture_available());
+    assert(pw_wine_capture_open(&rate)==-1 && rate==0);
+    assert(pw_wine_capture_input(grain,&state)==-1 && state==PW_WINE_MIC_UNKNOWN && grain[0]==0);
+    assert(pw_wine_mic_state()==PW_WINE_MIC_UNKNOWN);
+    /* a source without its required calls is no source */
+    PwWineCaptureSource partial=source;partial.input=NULL;
+    pw_wine_set_capture_source(&partial,&tag);assert(!pw_wine_capture_available());
+
+    pw_wine_set_capture_source(&source,&tag);
+    assert(pw_wine_capture_available());
+    assert(pw_wine_capture_open(NULL)==-1 && mic_opens==0);
+    assert(pw_wine_capture_open(&rate)==0 && rate==16000 && mic_seen==&tag);
+    mic_open_fail=1;rate=0;assert(pw_wine_capture_open(&rate)==-4 && rate==0);mic_open_fail=0;
+    mic_rate=0;assert(pw_wine_capture_open(&rate)==-1);mic_rate=16000;   /* no rate: no microphone */
+
+    assert(pw_wine_capture_input(NULL,&state)==-1 && mic_inputs==0);
+    assert(pw_wine_capture_input(grain,&state)==0 && state==PW_WINE_MIC_LIVE);
+    assert(grain[0]==7 && grain[PW_WINE_CAPTURE_GRAIN-1]==PW_WINE_CAPTURE_GRAIN+6);
+    assert(pw_wine_mic_state()==PW_WINE_MIC_LIVE);   /* the poll does not know: the grain's */
+    /* the mute button: zeros, whatever the source left in the grain */
+    mic_now=PW_WINE_MIC_MUTED;
+    assert(pw_wine_capture_input(grain,NULL)==0 && grain[0]==0 && grain[100]==0);
+    assert(pw_wine_mic_state()==PW_WINE_MIC_MUTED);
+    mic_now=PW_WINE_MIC_NO_DEVICE;
+    assert(pw_wine_capture_input(grain,&state)==0 && state==PW_WINE_MIC_NO_DEVICE && grain[5]==0);
+    /* an impossible state is unknown, and the grain passes */
+    mic_now=77;
+    assert(pw_wine_capture_input(grain,&state)==0 && state==PW_WINE_MIC_UNKNOWN && grain[0]==7);
+    /* a failed capture is zeros, counted, and leaves the state alone */
+    mic_now=PW_WINE_MIC_LIVE;mic_input_fail=1;
+    assert(pw_wine_capture_input(grain,&state)==-6 && state==PW_WINE_MIC_UNKNOWN && grain[0]==0);
+    mic_input_fail=0;
+    /* the source's own answer wins while it has one */
+    mic_polled=PW_WINE_MIC_MUTED;assert(pw_wine_mic_state()==PW_WINE_MIC_MUTED);
+    mic_polled=PW_WINE_MIC_LIVE;assert(pw_wine_mic_state()==PW_WINE_MIC_LIVE);
+    mic_polled=99;assert(pw_wine_mic_state()==PW_WINE_MIC_LIVE);
+    pw_wine_sink_stats(&s);
+    assert(s.capture_grains==4 && s.capture_silent==2 && s.capture_dropped==2);   /* no source, and -6 */
+    assert(s.mic_state==PW_WINE_MIC_LIVE);
+    /* removed: nothing is offered and the state is forgotten */
+    pw_wine_set_capture_source(NULL,NULL);
+    assert(!pw_wine_capture_available() && pw_wine_mic_state()==PW_WINE_MIC_UNKNOWN);
+    assert(pw_wine_capture_input(grain,&state)==-1 && mic_inputs==5);
+}
+
 static void *poster(void *arg)
 {
     (void)arg;
@@ -240,6 +313,7 @@ int main(void)
     fail_next=1;assert(pw_wine_present(frame,4,3,16)==-7 && calls==2);
     pw_wine_sink_stats(&s);assert(s.frames==1 && s.frames_dropped==5);
     test_audio();
+    test_capture();
 
     /* Input is first in, first out, validated, and bounded. */
     PwWineInput e,out;
