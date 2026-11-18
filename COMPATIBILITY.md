@@ -66,6 +66,18 @@ that file corrected the oversized UI, soft picture and confined mouse
 pointer. The mouse wheel remains unsupported; use keyboard alternatives
 for zoom and scrolling ([controls](docs/CONTROLS.md#usb-keyboard-and-mouse)).
 
+## Anti-cheat
+
+Games protected by BattlEye cannot run. BattlEye needs a Windows kernel
+driver, which Wine does not load, and the Wine runtime BattlEye offers is a
+Linux library that each game's developer must enable and the PS5 cannot
+load. The launcher recognises BattlEye's files beside a game (a `BattlEye`
+directory, `BEService`, `BEClient` or a `*_BE.exe` start executable, in the
+executable's directory or the two above it), lists that game as
+"BattlEye anti-cheat: not supported" and does not start it. The log records
+`PW_WINE64 profile unsupported ... anticheat=battleye`. prospero-win does
+not bypass or imitate anti-cheat software.
+
 ## Benchmarks
 
 7-Zip 25.01, nbench and Ooura's pi program completed on 2026-09-28 in PE32

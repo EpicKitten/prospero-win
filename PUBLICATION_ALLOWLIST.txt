@@ -286,6 +286,8 @@ native/pw_wine_display.h
 native/pw_wine_library.c
 native/pw_wine_library.h
 src/pw_wine_start.h
+src/pw_anticheat.c
+src/pw_anticheat.h
 src/pw_wine_launch.c
 src/pw_wine_launch.h
 src/pw_game_profile.c
@@ -297,6 +299,7 @@ native/pw_wine_prefix.h
 tests/test_pw_prefix_temp.c
 tests/test_pw_wine_prefix_cpu.c
 tests/test_pw_wine_start.c
+tests/test_pw_anticheat.c
 tests/test_pw_wine_launch.c
 tests/test_pw_game_profile.c
 tests/test_pw_gameplay_run.py

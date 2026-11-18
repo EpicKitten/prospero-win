@@ -35,6 +35,7 @@
 #include "../src/pw_launcher_render.h"
 #include "../src/pw_script_input.h"
 #include "../src/pw_wine_launch.h"
+#include "../src/pw_anticheat.h"
 #include "../src/pw_game_menu.h"
 #include "pw_data_mount.h"
 #include "pw_audio_ps5.h"
@@ -50,6 +51,7 @@
 #include "pw_wine_display.h"
 #include "../include/prospero_win.h"
 
+#include <dirent.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -236,6 +238,12 @@ static PwWineLibrary library;
 static PwWineApp catalog[PW_WINE_LIBRARY_MAX];
 static char catalog_detail[PW_WINE_LIBRARY_MAX][64];
 static size_t catalog_count;
+/* Valid profiles left out of the catalog because the game ships an
+ * anti-cheat Wine cannot run (src/pw_anticheat.h): listed, not choosable. */
+static const PwGameProfile *unsupported[PW_WINE_LIBRARY_MAX];
+static size_t unsupported_count;
+/* This start asked for one of them; the launcher says why it did not run. */
+static int unsupported_launch;
 static const char *library_root = PW_WINE64_ROOT_SANDBOX;
 
 /* The largest desktop shown: Wine's PS5 driver defaults to 800x600
@@ -722,6 +730,40 @@ static void on_exit_report(void)
 
 /* ---- library ------------------------------------------------------------ */
 
+/* A game's Wine prefix: its profile's, or the shared one (also for a bare
+ * path=, with game NULL). */
+static void game_prefix(const PwGameProfile *game, char *out, size_t size)
+{
+    if (game && strcmp(game->app.prefix, "default"))
+        snprintf(out, size, "%s/prefixes/%s", library_root, game->app.prefix);
+    else
+        snprintf(out, size, "%s/prefix", library_root);
+}
+
+/* pw_anticheat's directory listing, through readdir. */
+static int list_game_dir(const char *directory,
+                         void (*found)(const char *name, size_t length, void *context),
+                         void *context, void *list_context)
+{
+    DIR *dir = opendir(directory);
+    struct dirent *entry;
+
+    (void)list_context;
+    if (!dir) return -1;
+    while ((entry = readdir(dir))) found(entry->d_name, strlen(entry->d_name), context);
+    closedir(dir);
+    return 0;
+}
+
+/* The anti-cheat installed with the game whose executable is executable. */
+static PwAntiCheat game_anticheat(const PwGameProfile *game, const char *executable)
+{
+    char game_prefix_dir[PW_WINE_LIBRARY_PATH + PW_APP_ID_CAPACITY];
+
+    game_prefix(game, game_prefix_dir, sizeof(game_prefix_dir));
+    return pw_anticheat_scan(game_prefix_dir, executable, list_game_dir, NULL);
+}
+
 /* Complete the one-shot helper exchange before loading profiles or starting
  * Wine. A failed or incomplete request closes this process to Home. */
 static int open_library(void)
@@ -747,6 +789,13 @@ static int open_library(void)
             continue;
         }
         const PwGameProfile *game = &entry->profile;
+        PwAntiCheat anticheat = game_anticheat(game, game->app.executable);
+        if (anticheat != PW_ANTICHEAT_NONE) {
+            PS5LOG_LOG("PW_WINE64 profile unsupported file=%s id=%s anticheat=%s", entry->file,
+                       game->app.id, pw_anticheat_label(anticheat));
+            unsupported[unsupported_count++] = game;
+            continue;
+        }
         if (game->display.width)
             snprintf(catalog_detail[catalog_count], sizeof(catalog_detail[0]), "%s  %s  %ux%u",
                      game->app.architecture == PW_APP_ARCH_PE64 ? "pe64" : "pe32",
@@ -763,8 +812,9 @@ static int open_library(void)
         catalog_count++;
     }
     PS5LOG_LOG("PW_WINE64 library status=%s listed_by=%d scan_errno=%d entries=%u games=%u "
-                   "root=%s", pw_result_name(status), library.listed_by, library.scan_error,
-               (unsigned)library.count, (unsigned)catalog_count, library_root);
+                   "unsupported=%u root=%s", pw_result_name(status), library.listed_by,
+               library.scan_error, (unsigned)library.count, (unsigned)catalog_count,
+               (unsigned)unsupported_count, library_root);
     return 0;
 }
 
@@ -803,6 +853,7 @@ static void run_launcher(void)
     const size_t frame_bytes = (size_t)PW_LAUNCHER_RENDER_WIDTH * PW_LAUNCHER_RENDER_HEIGHT * 4u;
     uint8_t *frame = mmap(NULL, frame_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     PwLauncherScene scene = { items, 0, PW_LAUNCHER_RENDER_NONE,
+        unsupported_launch ? "THAT GAME USES BATTLEYE ANTI-CHEAT, WHICH CANNOT RUN HERE" :
         launch.refused ? "THAT GAME IS NOT IN THE LIBRARY" :
         !catalog_count ? "ADD PROFILES TO /DATA/PROSPERO-WIN/PROFILES" :
         launch.cycle ? "WELCOME BACK" : "CHOOSE A GAME" };
@@ -823,9 +874,13 @@ static void run_launcher(void)
         }
         hid_status = pw_hid_ps5_open(&hid, pw_hid_ps5_system_ops(hid_log), user);
     }
-    /* The games, then the refused profiles, listed by file as not available. */
+    /* The games, then those whose anti-cheat cannot run and the refused
+     * profiles, listed as not available. */
     for (size_t i = 0; i < catalog_count; i++)
         items[scene.count++] = (PwLauncherItem){ catalog[i].name, catalog[i].detail, 1 };
+    for (size_t i = 0; i < unsupported_count; i++)
+        items[scene.count++] = (PwLauncherItem){ unsupported[i]->app.name,
+                                                 "BattlEye anti-cheat: not supported", 0 };
     for (uint32_t i = 0; i < library.count; i++)
         if (library.entries[i].status != PW_OK)
             items[scene.count++] = (PwLauncherItem){ library.entries[i].file, "profile refused", 0 };
@@ -1090,6 +1145,20 @@ int main(int argc, char **argv)
     PS5LOG_LOG("PW_WINE64 args argc=%d mode=%s profile=%s cycle=%u refused=%u", argc,
                launch.mode == PW_WINE_LAUNCH_GAME ? "game" : "launcher",
                launch.app ? launch.app->id : "-", (unsigned)launch.cycle, launch.refused);
+    /* A game with an anti-cheat Wine cannot run is never started: a profile
+     * left out of the catalog for it, or a bare path= to one. */
+    for (int i = 0; launch.refused && i < argc; i++)
+        for (size_t u = 0; argv[i] && !strncmp(argv[i], "profile=", 8) && u < unsupported_count; u++)
+            if (!strcmp(argv[i] + 8, unsupported[u]->app.id)) unsupported_launch = 1;
+    if (launch.mode == PW_WINE_LAUNCH_GAME && !launch.app) {
+        PwAntiCheat anticheat = game_anticheat(NULL, launch.executable);
+        if (anticheat != PW_ANTICHEAT_NONE) {
+            PS5LOG_LOG("PW_WINE64 path unsupported anticheat=%s", pw_anticheat_label(anticheat));
+            launch.mode = PW_WINE_LAUNCH_LAUNCHER;
+            unsupported_launch = 1;
+        }
+    }
+    if (unsupported_launch) PS5LOG_LOG("PW_WINE64 startup refused reason=anticheat");
     if (launch.mode != PW_WINE_LAUNCH_GAME && single_program()) {
         /* A single-program title starts its profile as the launcher would. */
         for (uint32_t i = 0; i < catalog_count; i++)
@@ -1104,10 +1173,7 @@ int main(int argc, char **argv)
      * path= runs in the default prefix with nothing bound. */
     pw_game_input_init(&game_input);
     game = launch.app ? pw_wine_library_find(&library, launch.app->id) : NULL;
-    if (game && strcmp(game->app.prefix, "default"))
-        snprintf(prefix, sizeof(prefix), "%s/prefixes/%s", library_root, game->app.prefix);
-    else
-        snprintf(prefix, sizeof(prefix), "%s/prefix", library_root);
+    game_prefix(game, prefix, sizeof(prefix));
     snprintf(radv_cache, sizeof(radv_cache), "%s/cache/radv", library_root);
     if (game) {
         int input_status = pw_wine_library_input(game, library_root, &game_input);
